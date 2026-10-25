@@ -12,15 +12,15 @@ trial_nums = 30
 ts = np.linspace(min_data, max_data, datapoints)
 
 def equation(t):
-    #eq being used is x'' + x' + 0.1x = 0
+    '''eq being used is x'' + x' + 0.1x = 0'''
     
-    c = 1
-    k = 0.1
-    m=1
+    c = 0.1
+    k = 1
+    m = 1
     gamma = c/(2*m)
     A = 1
     B =1
-    omega = np.sqrt(k/m * gamma**2)
+    omega = np.sqrt(k/m - gamma**2)
     
     x = np.exp(-gamma*t)*(A*np.cos(omega*t)+ B*np.sin(omega*t))
     return x
