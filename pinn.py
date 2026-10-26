@@ -1,5 +1,6 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -12,34 +13,30 @@ import numpy as np
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", DEVICE)
 
-'''
-# -----------------------------
-# Plot raw training data
-# -----------------------------
 
-plt.scatter(Ttrain.cpu().numpy(), Xtrain.cpu().numpy(), s=2, label="Training data")
-plt.xlabel("time / s")
-plt.ylabel("displacement / m")
-plt.legend()
-plt.show()
-'''
 
 
 #------------------------------
-# Normalise and clean data
+# Collocation points
 #------------------------------
-
-#Normalisation
-'''
-Ttrain_mean = torch.mean(Ttrain).to(DEVICE)
-Ttrain_std = torch.std(Ttrain).to(DEVICE)
-
-Ttrain_norm = (Ttrain - Ttrain_mean) / Ttrain_std
-Ttest_norm = (Ttest - Ttrain_mean) / Ttrain_std
-'''
-
 
 Ttrain_colloc = torch.linspace(300, 400, 500).view(-1, 1).to(DEVICE)
+
+#------------------------------
+# True solution (for plotting)
+#------------------------------
+
+TRUE_GAMMA = 0.1   # c/m
+TRUE_OMEGA = 1.0   # sqrt(k/m)
+
+def true_solution(t):
+    '''Analytic solution of x'' + gamma*x' + omega^2*x = 0 with x(0) = 1, x'(0) = 0 (ICs from Kaggle dataset).'''
+    decay = TRUE_GAMMA/2
+    omega_d = np.sqrt(TRUE_OMEGA**2 - decay**2)
+    return np.exp(-decay*t)*(np.cos(omega_d*t) + (decay/omega_d)*np.sin(omega_d*t))
+
+# Dense grid over the training and extrapolation regions, used for plots
+Tplot = torch.linspace(0, 400, 2000).view(-1, 1).to(DEVICE)
 
 # -----------------------------
 # Dataset class
@@ -89,8 +86,8 @@ class TanhNet(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.1))
         self.omega = nn.Parameter(torch.tensor(1.1))
 
-    def forward(self, tnorm):
-        return self.net(tnorm)
+    def forward(self, t):
+        return self.net(t)
 
 
 class SinNet(nn.Module):
@@ -109,8 +106,8 @@ class SinNet(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.1))
         self.omega = nn.Parameter(torch.tensor(1.1))
 
-    def forward(self, tnorm):
-        return self.net(tnorm)
+    def forward(self, t):
+        return self.net(t)
 
 
 class DecaySinNet(nn.Module):
@@ -128,11 +125,10 @@ class DecaySinNet(nn.Module):
         self.gamma = nn.Parameter(torch.tensor(0.1))
         self.omega = nn.Parameter(torch.tensor(1.1))
 
-    def forward(self, tnorm):
-        t = tnorm #* Ttrain_std + Ttrain_mean
-        envelope = torch.exp(-self.gamma*t)
-        
-        return envelope * self.net(tnorm)
+    def forward(self, t):
+        envelope = torch.exp(-self.gamma*t/2)
+
+        return envelope * self.net(t)
         
 
 # -----------------------------
@@ -149,261 +145,324 @@ model = SinNet().to(DEVICE)
 # -----------------------------
 
 
-loss_fcn = nn.MSELoss()
-'''
+#loss_fcn = nn.MSELoss()
+
 def loss_fcn(model_x,x_real):
     alpha = 500 #increase this to increase how much large displacement is weighted
     weights = 1 + alpha*torch.abs(x_real)
     return torch.sum(weights*(x_real-model_x)**2)/torch.sum(weights)
-    '''
+    
 optimizer = Adam(model.parameters(), lr=1e-3)
 
 epochs = 5000
+snapshot_every = 500   # how often to save the prediction for the snapshot plot
+
+# Recorded every epoch
 gammaList = []
 epochList = []
 omegaList = []
+dataLossList = []
+physLossList = []
+collocLossList = []
 
-#Lamb is the weighting of the physics loss when contributing
+snapshots = []   # list of (epoch, prediction on Tplot)
+
+num_trials = 30
+
+#Lamb is the weighting of the physics loss
 lamb = 1
 
-trainIDs = np.arange(100)
+trialIDs = np.arange(num_trials)
 errorstds = [0,0.001,0.01,0.1,0.2,0.5]
+# -----------------------------
+# Load data
+# -----------------------------
 
-for trainID in trainIDs:
-    for errorstd in errorstds:
-        
-        
-        # -----------------------------
-        # Load data
-        # -----------------------------
-        
-        trainData = pd.read_csv("extrapolation/train.csv")
-        testData = pd.read_csv("extrapolation/test.csv")
-        
-        # Sort by time so plotting looks sensible
-        trainData = trainData.sort_values("time")
-        testData = testData.sort_values("time")
-        
-        # Convert pandas columns to PyTorch tensors
-        Ttrain = torch.tensor(trainData["time"].values, dtype=torch.float32).view(-1, 1).to(DEVICE)
-        Xtrain = torch.tensor(trainData["displacement"].values, dtype=torch.float32).view(-1, 1)
-        
-        Ttest = torch.tensor(testData["time"].values, dtype=torch.float32).view(-1, 1).to(DEVICE)
-        Xtest = torch.tensor(testData["displacement"].values, dtype=torch.float32).view(-1, 1)
-        
-        Ttrain_norm = Ttrain
-        Ttest_norm = Ttest
-        
-        
-        train_dataset = OscillatorDataset(Ttrain_norm, Xtrain)
-        train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        coll_dataloader = DataLoader(Ttrain_colloc, batch_size = 32, shuffle=True)
-        
-        
-        
-        # -----------------------------
-        # Training loop
-        # -----------------------------
-        for epoch in range(epochs):
-            model.train()
-        
-            for batch_t, batch_x in train_dataloader:
-                batch_t = batch_t.to(DEVICE)
-                batch_x = batch_x.to(DEVICE)
-        
-                # Forward pass
-                batch_t = batch_t.clone().detach().requires_grad_(True)
-        
-                x_pred = model(batch_t)
-        
-                # Calculate loss
-                data_loss = loss_fcn(x_pred, batch_x)
-        
-        
-                dx_dt = torch.autograd.grad(
-                            outputs = x_pred,
-                            inputs = batch_t,
-                            grad_outputs = torch.ones_like(x_pred),
-                            create_graph = True
-                            )[0] #/ Ttrain_std
-                d2x_dt2 = torch.autograd.grad(
-                            outputs = dx_dt,
-                            inputs = batch_t,
-                            grad_outputs = torch.ones_like(dx_dt),
-                            create_graph = True
-                            )[0] #/ Ttrain_std
-                
-                residual = d2x_dt2 + model.gamma*dx_dt + (model.omega**2) *x_pred
-                phys_loss = torch.mean(residual**2)
-                
-                # Collocation points, same step
-                tc = Ttrain_colloc.clone().detach().requires_grad_(True)
-                x_c = model(tc)
-                dx_c = torch.autograd.grad(x_c, tc, torch.ones_like(x_c), create_graph=True)[0]
-                d2x_c = torch.autograd.grad(dx_c, tc, torch.ones_like(dx_c), create_graph=True)[0]
-                colloc_residual = d2x_c + model.gamma*dx_c + (model.omega**2)*x_c
-                colloc_phys_loss = torch.mean(colloc_residual**2)
-        
-                loss = phys_loss*lamb + colloc_phys_loss*lamb + data_loss
-                
-                
-                # Backpropagation
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                
-            # Evaluate training loss once per epoch
-        
-            model.eval()
-            
-            Ttrain_eval = Ttrain_norm.to(DEVICE).clone().detach().requires_grad_(True)
-            Xtrain_eval = Xtrain.to(DEVICE)
-            
-            # Prediction
-            Xpred_train = model(Ttrain_eval)
-            
-            # Data loss
-            train_data_loss = loss_fcn(Xpred_train, Xtrain_eval)
-            
-            # First derivative dx/dt
-            train_dx_dt = torch.autograd.grad(
-                outputs=Xpred_train,
-                inputs=Ttrain_eval,
-                grad_outputs=torch.ones_like(Xpred_train),
-                create_graph=True
-            )[0] #/ Ttrain_std
-            
-            # Second derivative d²x/dt²
-            train_d2x_dt2 = torch.autograd.grad(
-                outputs=train_dx_dt,
-                inputs=Ttrain_eval,
-                grad_outputs=torch.ones_like(train_dx_dt),
-                create_graph=True
-            )[0] #/ Ttrain_std
-            
-            # Physics residual
-            train_residual = train_d2x_dt2 + model.gamma * train_dx_dt + (model.omega**2)*Xpred_train
-            
-            # Physics loss
-            train_phys_loss = torch.mean(train_residual**2)
-            
-            # Collocation points, same step
-            tc = Ttrain_colloc.clone().detach().requires_grad_(True)
-            x_c = model(tc)
-            dx_c = torch.autograd.grad(x_c, tc, torch.ones_like(x_c), create_graph=True)[0]
-            d2x_c = torch.autograd.grad(dx_c, tc, torch.ones_like(dx_c), create_graph=True)[0]
-            colloc_residual = d2x_c + model.gamma*dx_c + (model.omega**2)*x_c
-            colloc_phys_loss = torch.mean(colloc_residual**2)
-        
-            train_loss = data_loss + lamb*phys_loss + colloc_phys_loss*lamb
-            if epoch % 100 == 0:
-                print(
-                    f"Epoch {epoch:4d} | "
-                    f"Train total loss = {train_loss.item():.8f} | "
-                    f"Train data loss = {colloc_phys_loss.item():.8f} | "
-                    f"Train colloc loss = {train_data_loss.item():.8f} | "
-                    f"Train physics loss = {train_phys_loss.item():.8f}\n"
-                    "gamma:", model.gamma.item(), '\n'
-                    "omega:", model.omega.item(), '\n'
-                )
-                gammaList.append(model.gamma.item())
-                omegaList.append(model.omega.item())
-                epochList.append(epoch)
+trainData = pd.read_csv("reconstruction/train.csv")
 
-           
-                
+# Sort by time so plotting looks sensible
+trainData = trainData.sort_values("time")
+
+# Convert pandas columns to PyTorch tensors
+Ttrain = torch.tensor(trainData["time"].values, dtype=torch.float32).view(-1, 1).to(DEVICE)
+Xtrain = torch.tensor(trainData["displacement"].values, dtype=torch.float32).view(-1, 1)
+
+
+
+
+train_dataset = OscillatorDataset(Ttrain, Xtrain)
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+
+
+# -----------------------------
+# Training loop
+# -----------------------------
+for epoch in range(epochs):
+    model.train()
+    epoch_data_loss = 0.0
+    epoch_phys_loss = 0.0
+    epoch_colloc_loss = 0.0
+
+    for batch_t, batch_x in train_dataloader:
+        batch_t = batch_t.to(DEVICE)
+        batch_x = batch_x.to(DEVICE)
+
+        # Forward pass
+        batch_t = batch_t.clone().detach().requires_grad_(True)
+
+        x_pred = model(batch_t)
+
+        # Calculate loss
+        data_loss = loss_fcn(x_pred, batch_x)
+
+
+        dx_dt = torch.autograd.grad(
+                    outputs = x_pred,
+                    inputs = batch_t,
+                    grad_outputs = torch.ones_like(x_pred),
+                    create_graph = True
+                    )[0]
+        d2x_dt2 = torch.autograd.grad(
+                    outputs = dx_dt,
+                    inputs = batch_t,
+                    grad_outputs = torch.ones_like(dx_dt),
+                    create_graph = True
+                    )[0]
         
-        # -----------------------------
-        # Test the model
-        # -----------------------------
+        residual = d2x_dt2 + model.gamma*dx_dt + (model.omega**2) *x_pred
+        phys_loss = torch.mean(residual**2)
         
-        Ttest_eval = Ttest_norm.to(DEVICE).clone().detach().requires_grad_(True)
-        Xtest_eval = Xtest.to(DEVICE)
+        # Collocation points, same step
+        tc = Ttrain_colloc.clone().detach().requires_grad_(True)
+        x_c = model(tc)
+        dx_c = torch.autograd.grad(x_c, tc, torch.ones_like(x_c), create_graph=True)[0]
+        d2x_c = torch.autograd.grad(dx_c, tc, torch.ones_like(dx_c), create_graph=True)[0]
+        colloc_residual = d2x_c + model.gamma*dx_c + (model.omega**2)*x_c
+        colloc_phys_loss = torch.mean(colloc_residual**2)
+
+        loss = phys_loss*lamb + colloc_phys_loss*lamb + data_loss
         
-        Xpred_test = model(Ttest_eval)
-        test_data_loss = loss_fcn(Xpred_test, Xtest_eval)
         
-        test_dx_dt = torch.autograd.grad(
-            outputs=Xpred_test,
-            inputs=Ttest_eval,
-            grad_outputs=torch.ones_like(Xpred_test),
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        epoch_data_loss += data_loss.item()
+        epoch_phys_loss += phys_loss.item()
+        epoch_colloc_loss += colloc_phys_loss.item()
+
+    # Record batch-averaged losses and parameters every epoch
+    n_batches = len(train_dataloader)
+    dataLossList.append(epoch_data_loss/n_batches)
+    physLossList.append(epoch_phys_loss/n_batches)
+    collocLossList.append(epoch_colloc_loss/n_batches)
+    gammaList.append(model.gamma.item())
+    omegaList.append(model.omega.item())
+    epochList.append(epoch)
+
+    # Save the prediction over the whole domain for the snapshot plot
+    if epoch % snapshot_every == 0 or epoch == epochs - 1:
+        with torch.no_grad():
+            snapshots.append((epoch, model(Tplot).cpu().numpy().ravel()))
+
+    if epoch % 100 == 0:
+        # Evaluate training loss once per 100 epochs
+
+        model.eval()
+        
+        Ttrain_eval = Ttrain.to(DEVICE).clone().detach().requires_grad_(True)
+        Xtrain_eval = Xtrain.to(DEVICE)
+        
+        # Prediction
+        Xpred_train = model(Ttrain_eval)
+        
+        # Data loss
+        train_data_loss = loss_fcn(Xpred_train, Xtrain_eval)
+        
+        # First derivative dx/dt
+        train_dx_dt = torch.autograd.grad(
+            outputs=Xpred_train,
+            inputs=Ttrain_eval,
+            grad_outputs=torch.ones_like(Xpred_train),
             create_graph=True
-        )[0] #/ Ttrain_std
+        )[0]
         
-        test_d2x_dt2 = torch.autograd.grad(
-            outputs=test_dx_dt,
-            inputs=Ttest_eval,
-            grad_outputs=torch.ones_like(test_dx_dt),
+        # Second derivative d²x/dt²
+        train_d2x_dt2 = torch.autograd.grad(
+            outputs=train_dx_dt,
+            inputs=Ttrain_eval,
+            grad_outputs=torch.ones_like(train_dx_dt),
             create_graph=True
-        )[0] #/ Ttrain_std
+        )[0]
         
-        test_residual = test_d2x_dt2 + model.gamma * test_dx_dt + (model.omega**2)*Xpred_test
-        test_phys_loss = torch.mean(test_residual**2)
+        # Physics residual
+        train_residual = train_d2x_dt2 + model.gamma * train_dx_dt + (model.omega**2)*Xpred_train
         
-        test_loss = test_data_loss + test_phys_loss
+        # Physics loss
+        train_phys_loss = torch.mean(train_residual**2)
         
+        # Collocation points, same step
+        tc = Ttrain_colloc.clone().detach().requires_grad_(True)
+        x_c = model(tc)
+        dx_c = torch.autograd.grad(x_c, tc, torch.ones_like(x_c), create_graph=True)[0]
+        d2x_c = torch.autograd.grad(dx_c, tc, torch.ones_like(dx_c), create_graph=False)[0]
+
+        colloc_residual = d2x_c + model.gamma*dx_c + (model.omega**2)*x_c
+        colloc_phys_loss = torch.mean(colloc_residual**2)
+
+        train_loss = train_data_loss + lamb*train_phys_loss + colloc_phys_loss*lamb
         print(
-            f"Final test loss = {test_loss.item():.8f} | "
-            f"Final data loss = {test_data_loss.item():.8f} | "
-            f"Final physcs loss = {test_phys_loss.item():.8f}"
+            f"Epoch {epoch:4d} | "
+            f"Train total loss = {train_loss.item():.8f} | "
+            f"Train data loss = {train_data_loss.item():.8f} | "
+            f"Train colloc loss = {colloc_phys_loss.item():.8f} | "
+            f"Train physics loss = {train_phys_loss.item():.8f}\n"
+            "gamma:", model.gamma.item(), '\n'
+            "omega:", model.omega.item(), '\n'
         )
+
+    
         
 
-
-'''
 # -----------------------------
-# Plot training prediction
+# Test the model
+# -----------------------------
+errorstd = errorstds[1]
+for trialID in trialIDs:
+    testData = pd.read_csv("generated_data/oscillator_data__noise" + str(errorstd) + "__trial_ID" + str(trialID) + ".csv")
+
+    # Sort by time so plotting looks sensible
+    testData = testData.sort_values("time")
+
+    # Convert pandas columns to PyTorch tensors
+    Ttest = torch.tensor(testData["time"].values, dtype=torch.float32).view(-1, 1).to(DEVICE)
+    Xtest = torch.tensor(testData["displacement"].values, dtype=torch.float32).view(-1, 1).to(DEVICE)
+
+    Ttest_eval = Ttest.to(DEVICE).clone().detach().requires_grad_(True)
+    Xtest_eval = Xtest.to(DEVICE)
+
+    Xpred_test = model(Ttest_eval)
+    test_data_loss = loss_fcn(Xpred_test, Xtest_eval)
+
+    test_dx_dt = torch.autograd.grad(
+        outputs=Xpred_test,
+        inputs=Ttest_eval,
+        grad_outputs=torch.ones_like(Xpred_test),
+        create_graph=True
+    )[0]
+
+    test_d2x_dt2 = torch.autograd.grad(
+        outputs=test_dx_dt,
+        inputs=Ttest_eval,
+        grad_outputs=torch.ones_like(test_dx_dt),
+        create_graph=True
+    )[0]
+
+    test_residual = test_d2x_dt2 + model.gamma * test_dx_dt + (model.omega**2)*Xpred_test
+    test_phys_loss = torch.mean(test_residual**2)
+
+    test_loss = test_data_loss + test_phys_loss
+
+    print(
+        f"Final test loss = {test_loss.item():.8f} | "
+        f"Final data loss = {test_data_loss.item():.8f} | "
+        f"Final physics loss = {test_phys_loss.item():.8f}"
+    )
+
+
+
+# -----------------------------
+# Plots
 # -----------------------------
 
-Xpred_train = Xpred_train.cpu().detach()
-Ttrain = Ttrain.cpu().detach()
-Xpred_test = Xpred_test.cpu().detach()
-Ttest = Ttest.cpu().detach()
+plot_dir = Path(__file__).resolve().parent / "plots"
+plot_dir.mkdir(exist_ok=True)
 
-plt.scatter(Ttrain.numpy(), Xtrain.numpy(), s=2, label="Training data")
-plt.plot(Ttrain.numpy(), Xpred_train.numpy(), label="NN prediction")
-plt.xlabel("time / s")
-plt.ylabel("displacement / m")
-plt.title("Training region")
-plt.legend()
+Tplot_np = Tplot.cpu().numpy().ravel()
+Xtrue_plot = true_solution(Tplot_np)
+train_end = Ttrain.max().item()
+
+# 1. Prediction snapshots during training
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.axvspan(train_end, Tplot_np[-1], color="grey", alpha=0.15, label="Extrapolation region")
+
+# Earlier snapshots: thin and faded, coloured by epoch
+cmap = plt.cm.viridis
+norm = plt.Normalize(0, epochs - 1)
+for i, (snap_epoch, snap_pred) in enumerate(snapshots[:-1]):
+    ax.plot(Tplot_np, snap_pred, color=cmap(norm(snap_epoch)), lw=0.8, alpha=0.5,
+            label="NN prediction (earlier epochs)" if i == 0 else None)
+ax.scatter(Ttrain.cpu().numpy(), Xtrain.numpy(), s=4, color="black", label="Training data", zorder=3)
+
+# Final prediction: thick and on top
+final_epoch, final_pred = snapshots[-1]
+ax.plot(Tplot_np, final_pred, color="tab:blue", lw=2, zorder=4,
+        label=f"NN prediction (final, epoch {final_epoch})")
+
+ax.plot(Tplot_np, Xtrue_plot, "r--", lw=1.2, zorder=5, label="True solution")
+fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label="epoch")
+ax.set_xlabel("time / s")
+ax.set_ylabel("displacement / m")
+ax.set_title("NN prediction during training")
+ax.legend(loc="upper right", fontsize=8)
+fig.tight_layout()
+fig.savefig(plot_dir / "prediction_snapshots.png", dpi=150)
 plt.show()
 
+# 2. gamma and omega against epochs
+fig, (ax_gamma, ax_omega) = plt.subplots(2, 1, sharex=True, figsize=(7, 5))
+ax_gamma.plot(epochList, gammaList)
+ax_gamma.axhline(TRUE_GAMMA, color="r", ls="--", label=f"True = {TRUE_GAMMA}")
+ax_gamma.set_ylabel("gamma")
+ax_gamma.legend()
 
-# -----------------------------
-# Plot extrapolation prediction
-# -----------------------------
+ax_omega.plot(epochList, omegaList)
+ax_omega.axhline(TRUE_OMEGA, color="r", ls="--", label=f"True = {TRUE_OMEGA}")
+ax_omega.set_ylabel("omega")
+ax_omega.set_xlabel("epoch")
+ax_omega.legend()
 
-plt.scatter(Ttest.numpy(), Xtest.numpy(), s=2, label="Test data")
-plt.plot(Ttest.numpy(), Xpred_test.numpy(), label="NN prediction")
-plt.xlabel("time / s")
-plt.ylabel("displacement / m")
-plt.title("Extrapolation region")
-plt.legend()
+fig.suptitle("Learned parameters")
+fig.tight_layout()
+fig.savefig(plot_dir / "parameters.png", dpi=150)
 plt.show()
 
-
-# -----------------------------
-# Plot train and test together
-# -----------------------------
-
-plt.scatter(Ttrain.numpy(), Xtrain.numpy(), s=2, label="Training data")
-plt.scatter(Ttest.numpy(), Xtest.numpy(), s=2, label="Test data")
-
-plt.plot(Ttrain.numpy(), Xpred_train.numpy(), label="NN train prediction")
-plt.plot(Ttest.numpy(), Xpred_test.numpy(), label="NN test prediction", color = 'red')
-
-plt.xlabel("time / s")
-plt.ylabel("displacement / m")
-plt.title("Damped oscillator NN prediction")
-plt.legend()
+# 3. Loss curves
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.semilogy(epochList, dataLossList, label="Data loss")
+ax.semilogy(epochList, physLossList, label="Physics loss (training points)")
+ax.semilogy(epochList, collocLossList, label="Physics loss (collocation points)")
+ax.set_xlabel("epoch")
+ax.set_ylabel("loss (batch average)")
+ax.set_title("Training losses")
+ax.legend()
+fig.tight_layout()
+fig.savefig(plot_dir / "losses.png", dpi=150)
 plt.show()
 
-#----------------------------
-#Plot gamma against epochs
-#----------------------------
-plt.scatter(epochList, gammaList)
+# 4. Final error and physics residual against time
+Tplot_eval = Tplot.clone().detach().requires_grad_(True)
+Xpred_plot = model(Tplot_eval)
+dx_plot = torch.autograd.grad(Xpred_plot, Tplot_eval, torch.ones_like(Xpred_plot), create_graph=True)[0]
+d2x_plot = torch.autograd.grad(dx_plot, Tplot_eval, torch.ones_like(dx_plot))[0]
+residual_plot = d2x_plot + model.gamma*dx_plot + (model.omega**2)*Xpred_plot
+
+Xpred_plot_np = Xpred_plot.detach().cpu().numpy().ravel()
+residual_plot_np = residual_plot.detach().cpu().numpy().ravel()
+
+fig, (ax_err, ax_res) = plt.subplots(2, 1, sharex=True, figsize=(10, 5))
+ax_err.semilogy(Tplot_np, np.abs(Xpred_plot_np - Xtrue_plot))
+ax_err.set_ylabel("|x_pred - x_true| / m")
+ax_err.set_title("Final error against the true (noise-free) solution")
+
+ax_res.semilogy(Tplot_np, residual_plot_np**2)
+ax_res.set_ylabel("physics residual²")
+ax_res.set_xlabel("time / s")
+
+for ax in (ax_err, ax_res):
+    ax.axvspan(train_end, Tplot_np[-1], color="grey", alpha=0.15)
+fig.tight_layout()
+fig.savefig(plot_dir / "error_and_residual.png", dpi=150)
 plt.show()
-plt.scatter(epochList, omegaList)
-plt.show()
-'''

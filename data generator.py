@@ -16,16 +16,16 @@ output_dir = Path(__file__).resolve().parent / "generated_data"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 def equation(t):
-    '''eq being used is x'' + x' + 0.1x = 0'''
+    '''eq being used is x'' + 0.1x' + x = 0'''
     
     c = 0.1
     k = 1
     m = 1
     gamma = c/(2*m)
     A = 1
-    B =1
     omega = np.sqrt(k/m - gamma**2)
-    
+    B = gamma/omega
+
     x = np.exp(-gamma*t)*(A*np.cos(omega*t)+ B*np.sin(omega*t))
     return x
 
@@ -35,7 +35,6 @@ for noise_std in noise_stds:
         This is done to ensure that I can directly compare the effect of noise on the same underlying data.'''
         seed = trial_ID
         rng = np.random.default_rng(seed)
-        
         
         
         errors = rng.normal(0, noise_std, datapoints)
